@@ -1,0 +1,11 @@
+output/
+test-output/
+*.tmp
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.env
+dist/
+build/
+*.egg-info/
