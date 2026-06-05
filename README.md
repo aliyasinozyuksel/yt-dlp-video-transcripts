@@ -1,5 +1,9 @@
 # YouTube Channel Transcripts
 
+[![CI](https://github.com/aliyasinozyuksel/yt-dlp-video-transcripts/actions/workflows/ci.yml/badge.svg)](https://github.com/aliyasinozyuksel/yt-dlp-video-transcripts/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 Download English subtitles/transcripts from YouTube channels, playlists, or individual videos and save them as plain `.txt` and agent-friendly `.md` files.
 
 This tool uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to fetch subtitles only. It does **not** download video or audio files.
@@ -14,6 +18,26 @@ This tool uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to fetch subtitles onl
 - Resumes safely by skipping completed transcript pairs
 - Repairs partial transcript files after interrupted runs
 - Detects existing transcripts by `video_id`, not just filename
+
+## Quick start
+
+```bash
+git clone https://github.com/aliyasinozyuksel/yt-dlp-video-transcripts.git
+cd yt-dlp-video-transcripts
+pip install -r requirements.txt
+
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@3blue1brown/videos" \
+  -o ./output --max-videos 5
+```
+
+Preview actions without downloading or writing files:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@3blue1brown/videos" \
+  -o ./output --max-videos 5 --dry-run
+```
 
 ## Installation
 
@@ -193,7 +217,7 @@ If you process multiple tabs into the same output folder, numbering can collide.
 ```bash
 python -m pytest
 python -m compileall scripts
-ruff check .
+python -m ruff check .
 ```
 
 ## Troubleshooting
