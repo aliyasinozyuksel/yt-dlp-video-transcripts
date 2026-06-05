@@ -23,7 +23,7 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 EN_SUB_LANGS = ["en", "en-US", "en-GB", "en-orig"]
 CHANNEL_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/about")
@@ -261,24 +261,41 @@ def fetch_video_metadata(video_url: str) -> dict[str, Any]:
 def pick_english_subtitle(
     subtitles: dict,
     automatic_captions: dict,
+    *,
+    manual_only: bool = False,
 ) -> tuple[str | None, str | None]:
     for lang in EN_SUB_LANGS:
         if lang in subtitles:
             return lang, "manual"
 
-    for lang in EN_SUB_LANGS:
-        if lang in automatic_captions:
-            return lang, "auto"
-
     for lang in subtitles:
         if lang.startswith("en"):
             return lang, "manual"
+
+    if manual_only:
+        return None, None
+
+    for lang in EN_SUB_LANGS:
+        if lang in automatic_captions:
+            return lang, "auto"
 
     for lang in automatic_captions:
         if lang.startswith("en"):
             return lang, "auto"
 
     return None, None
+
+
+def subtitle_skip_reason(manual_only: bool) -> str:
+    if manual_only:
+        return "no_manual_english_subtitles"
+    return "no_english_subtitles"
+
+
+def subtitle_skip_message(manual_only: bool) -> str:
+    if manual_only:
+        return "no manual English subtitles"
+    return "no English subtitles"
 
 
 def find_subtitle_file(out_dir: Path, video_id: str, lang: str) -> Path | None:
@@ -629,6 +646,7 @@ def save_progress(
     end_index: int | None,
     max_videos: int | None,
     force: bool,
+    manual_only: bool,
     retries: int,
     processed: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -646,6 +664,7 @@ def save_progress(
         "end_index": end_index,
         "max_videos": max_videos,
         "forced": force,
+        "manual_only": manual_only,
         "retries": retries,
         "run_started_at": run_started_at,
         "last_updated_at": utc_now(),
@@ -728,6 +747,7 @@ def process_channel(
     force: bool = False,
     keep_cues: bool = False,
     dry_run: bool = False,
+    manual_only: bool = False,
 ) -> dict[str, Any]:
     channel_name, all_videos = list_channel_videos(channel_url)
     total_channel_videos = len(all_videos)
@@ -867,6 +887,7 @@ def process_channel(
                 end_index=end_index,
                 max_videos=max_videos,
                 force=force,
+                manual_only=manual_only,
                 retries=retries,
                 processed=processed,
                 skipped=skipped,
@@ -894,17 +915,21 @@ def process_channel(
 
             subtitles = metadata.get("subtitles") or {}
             automatic_captions = metadata.get("automatic_captions") or {}
-            lang, sub_type = pick_english_subtitle(subtitles, automatic_captions)
+            lang, sub_type = pick_english_subtitle(
+                subtitles,
+                automatic_captions,
+                manual_only=manual_only,
+            )
 
             if not lang:
-                print("  -> skipped (no English subtitles)")
+                print(f"  -> skipped ({subtitle_skip_message(manual_only)})")
                 skipped.append(
                     {
                         "index": global_index,
                         "id": video_id,
                         "title": resolved_title,
                         "url": video_url,
-                        "reason": "no_english_subtitles",
+                        "reason": subtitle_skip_reason(manual_only),
                     }
                 )
                 save_progress(
@@ -917,6 +942,7 @@ def process_channel(
                     end_index=end_index,
                     max_videos=max_videos,
                     force=force,
+                    manual_only=manual_only,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -965,6 +991,7 @@ def process_channel(
                     end_index=end_index,
                     max_videos=max_videos,
                     force=force,
+                    manual_only=manual_only,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -996,6 +1023,7 @@ def process_channel(
                     end_index=end_index,
                     max_videos=max_videos,
                     force=force,
+                    manual_only=manual_only,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1083,6 +1111,7 @@ def process_channel(
             end_index=end_index,
             max_videos=max_videos,
             force=force,
+            manual_only=manual_only,
             retries=retries,
             processed=processed,
             skipped=skipped,
@@ -1104,6 +1133,7 @@ def process_channel(
             "max_videos": max_videos,
             "forced": force,
             "keep_cues": keep_cues,
+            "manual_only": manual_only,
             "would_process_count": would_process_count,
             "would_skip_existing_count": would_skip_existing_count,
             "would_repair_partial_count": would_repair_partial_count,
@@ -1143,6 +1173,7 @@ def process_channel(
         "other_skipped_count": skip_counts["other_skipped_count"],
         "forced": force,
         "keep_cues": keep_cues,
+        "manual_only": manual_only,
         "retries": retries,
         "run_started_at": run_started_at,
         "run_finished_at": utc_now(),
@@ -1266,6 +1297,11 @@ def main() -> int:
         action="store_true",
         help="Preview planned actions without downloading subtitles or writing files",
     )
+    parser.add_argument(
+        "--manual-only",
+        action="store_true",
+        help="Use only manual English subtitles; do not fall back to auto captions",
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1304,6 +1340,7 @@ def main() -> int:
             args.force,
             args.keep_cues,
             args.dry_run,
+            args.manual_only,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)

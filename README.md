@@ -129,6 +129,16 @@ python scripts/channel_transcripts.py \
   -o ./output --keep-cues
 ```
 
+### Manual subtitles only
+
+By default, the tool uses manual English subtitles first, then falls back to English auto-generated captions. With `--manual-only`, auto captions are ignored and videos without manual English subtitles are skipped.
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --manual-only
+```
+
 ### Dry run (preview without downloading)
 
 Preview what the script would do without fetching subtitles or writing transcript/report files:
@@ -205,6 +215,7 @@ Would write files:      no
 | `--force` | off | Overwrite existing transcript files |
 | `--keep-cues` | off | Preserve bracketed subtitle cues |
 | `--dry-run` | off | Preview planned actions; no downloads or file writes |
+| `--manual-only` | off | Use only manual English subtitles; no auto caption fallback |
 | `--version` | — | Show version and exit |
 
 If either `--start-index` or `--end-index` is set, the index range takes priority over `--max-videos`.
