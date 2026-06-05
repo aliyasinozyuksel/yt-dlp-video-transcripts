@@ -23,7 +23,7 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 EN_SUB_LANGS = ["en", "en-US", "en-GB", "en-orig"]
 CHANNEL_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/about")
@@ -662,6 +662,25 @@ def save_progress(
     atomic_write_json(progress_path, progress)
 
 
+def print_dry_run_summary(
+    *,
+    total_channel_videos: int,
+    run_videos: int,
+    would_process_count: int,
+    would_skip_existing_count: int,
+    would_repair_partial_count: int,
+    output_path: Path,
+) -> None:
+    print("\nDry run complete.")
+    print(f"Total videos (channel): {total_channel_videos}")
+    print(f"Videos in this run:     {run_videos}")
+    print(f"Would process:          {would_process_count}")
+    print(f"Would skip existing:    {would_skip_existing_count}")
+    print(f"Would repair partial:   {would_repair_partial_count}")
+    print("Would write files:      no")
+    print(f"Output:                 {output_path}")
+
+
 def print_final_summary(
     *,
     total_channel_videos: int,
@@ -708,6 +727,7 @@ def process_channel(
     retry_delay: float = 2.0,
     force: bool = False,
     keep_cues: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     channel_name, all_videos = list_channel_videos(channel_url)
     total_channel_videos = len(all_videos)
@@ -733,19 +753,26 @@ def process_channel(
     last_run_report_path = base_dir / "last_run_report.json"
     cumulative_report_path = base_dir / "cumulative_report.json"
     reports_dir = base_dir / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        reports_dir.mkdir(parents=True, exist_ok=True)
     index_path = base_dir / "index.md"
 
     processed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    planned: list[dict[str, Any]] = []
     used_basenames: set[str] = set()
     existing_by_id = build_existing_files_index(md_dir, txt_dir)
     run_started_at = utc_now()
     last_global_index: int | None = None
+    would_process_count = 0
+    would_skip_existing_count = 0
+    would_repair_partial_count = 0
 
     print(f"Channel: {channel_name}")
     print(f"Total videos (channel): {total_channel_videos}")
     print(f"Videos in this run: {run_videos}")
+    if dry_run:
+        print("Dry run: yes")
     if start_index is not None or end_index is not None:
         print(f"Index range: {start_index or 1}-{end_index or total_channel_videos}")
     elif max_videos is not None:
@@ -771,6 +798,50 @@ def process_channel(
             existing_by_id,
             force,
         )
+
+        if dry_run:
+            if action == "skip":
+                print("  -> would skip (already exists)")
+                would_skip_existing_count += 1
+                planned.append(
+                    {
+                        "index": global_index,
+                        "id": video_id,
+                        "title": title,
+                        "url": video_url,
+                        "action": "skip",
+                        "reason": "already_exists",
+                        "basename": basename,
+                    }
+                )
+            elif action == "repair":
+                print("  -> would repair partial files")
+                would_repair_partial_count += 1
+                planned.append(
+                    {
+                        "index": global_index,
+                        "id": video_id,
+                        "title": title,
+                        "url": video_url,
+                        "action": "repair",
+                        "basename": basename,
+                    }
+                )
+            else:
+                print("  -> would process")
+                would_process_count += 1
+                planned.append(
+                    {
+                        "index": global_index,
+                        "id": video_id,
+                        "title": title,
+                        "url": video_url,
+                        "action": "process",
+                        "basename": basename,
+                        "forced": force,
+                    }
+                )
+            continue
 
         if action == "skip":
             print("  -> skipped (already exists)")
@@ -1019,8 +1090,39 @@ def process_channel(
             run_started_at=run_started_at,
         )
 
-        if delay > 0:
+        if delay > 0 and not dry_run:
             time.sleep(delay)
+
+    if dry_run:
+        report: dict[str, Any] = {
+            "dry_run": True,
+            "channel_url": channel_url,
+            "channel_name": channel_name,
+            "run_videos": run_videos,
+            "start_index": start_index,
+            "end_index": end_index,
+            "max_videos": max_videos,
+            "forced": force,
+            "keep_cues": keep_cues,
+            "would_process_count": would_process_count,
+            "would_skip_existing_count": would_skip_existing_count,
+            "would_repair_partial_count": would_repair_partial_count,
+            "would_write_files": False,
+            "run_started_at": run_started_at,
+            "run_finished_at": utc_now(),
+            "output_path": str(base_dir),
+            "planned": planned,
+        }
+        enrich_report_fields(report, total_channel_videos)
+        print_dry_run_summary(
+            total_channel_videos=total_channel_videos,
+            run_videos=run_videos,
+            would_process_count=would_process_count,
+            would_skip_existing_count=would_skip_existing_count,
+            would_repair_partial_count=would_repair_partial_count,
+            output_path=base_dir,
+        )
+        return report
 
     skip_counts = count_skip_reasons(skipped)
     partial_repaired_count = count_partial_repaired(processed)
@@ -1159,6 +1261,11 @@ def main() -> int:
         action="store_true",
         help="Preserve bracketed subtitle cues like [Music] and [Applause]",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview planned actions without downloading subtitles or writing files",
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1196,6 +1303,7 @@ def main() -> int:
             args.retry_delay,
             args.force,
             args.keep_cues,
+            args.dry_run,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)

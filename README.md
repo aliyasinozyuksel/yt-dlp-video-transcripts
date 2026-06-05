@@ -105,6 +105,18 @@ python scripts/channel_transcripts.py \
   -o ./output --keep-cues
 ```
 
+### Dry run (preview without downloading)
+
+Preview what the script would do without fetching subtitles or writing transcript/report files:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --max-videos 5 --dry-run
+```
+
+Dry run still lists videos and checks existing transcript files by `video_id`. It prints planned actions such as `would process`, `would skip (already exists)`, and `would repair partial files`.
+
 ### Version
 
 ```bash
@@ -124,6 +136,7 @@ python scripts/channel_transcripts.py --version
 | `--retry-delay` | `2.0` | Seconds between retries |
 | `--force` | off | Overwrite existing transcript files |
 | `--keep-cues` | off | Preserve bracketed subtitle cues |
+| `--dry-run` | off | Preview planned actions; no downloads or file writes |
 | `--version` | — | Show version and exit |
 
 If either `--start-index` or `--end-index` is set, the index range takes priority over `--max-videos`.
