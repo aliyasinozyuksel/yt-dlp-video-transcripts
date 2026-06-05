@@ -147,6 +147,50 @@ Dry run still lists videos and checks existing transcript files by `video_id`. I
 python scripts/channel_transcripts.py --version
 ```
 
+## Example output
+
+### Normal run
+
+```text
+Channel: 3Blue1Brown
+Total videos (channel): 149
+Videos in this run: 2
+Output: ./output/3blue1brown
+
+[1/2] (#1) How (and why) to take a logarithm of an image
+  -> saved (manual, en)
+[2/2] (#2) The most beautiful formula not enough people understand
+  -> saved (auto, en)
+
+Done.
+Processed:              2
+Already existing:       0
+Skipped:                0
+Errors:                 0
+```
+
+### Dry run
+
+```text
+Channel: 3Blue1Brown
+Total videos (channel): 149
+Videos in this run: 3
+Dry run: yes
+
+[1/3] (#1) How (and why) to take a logarithm of an image
+  -> would skip (already exists)
+[2/3] (#2) The most beautiful formula not enough people understand
+  -> would skip (already exists)
+[3/3] (#3) The Hairy Ball Theorem
+  -> would process
+
+Dry run complete.
+Would process:          1
+Would skip existing:    2
+Would repair partial:   0
+Would write files:      no
+```
+
 ## CLI options
 
 | Flag | Default | Description |
