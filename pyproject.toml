@@ -1,11 +1,11 @@
 [project]
 name = "youtube-channel-transcripts"
-version = "1.6.1"
+version = "1.6.2"
 description = "Download English YouTube subtitles/transcripts and save them as txt/md files."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "yt-dlp",
+    "yt-dlp>=2024.01.01",
 ]
 
 [project.optional-dependencies]

@@ -27,7 +27,7 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 DEFAULT_LANGS = ["en"]
 DEFAULT_OUTPUT_FORMAT = "both"
@@ -123,6 +123,13 @@ def md_table_cell(value: str) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+def md_heading_text(value: str) -> str:
+    text = re.sub(r"[\r\n\t]+", " ", value or "")
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Untitled"
+
+
 def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text)
@@ -166,12 +173,25 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+NON_RETRYABLE_EXCEPTIONS = (TypeError, ValueError, KeyError, AssertionError)
+
+
+def is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, NON_RETRYABLE_EXCEPTIONS):
+        return False
+    if isinstance(exc, (UserError, DependencyError)):
+        return False
+    return True
+
+
 def retry_call(fn: Callable[[], T], attempts: int, delay: float, action: str) -> T:
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
             return fn()
         except Exception as exc:
+            if not is_retryable_error(exc):
+                raise
             last_exc = exc
             if attempt < attempts - 1:
                 time.sleep(delay)
@@ -734,7 +754,7 @@ def build_md_content(
         *frontmatter,
         "---",
         "",
-        f"# {title}",
+        f"# {md_heading_text(title)}",
         "",
         transcript.strip(),
         "",
@@ -1918,6 +1938,10 @@ def main() -> int:
 
     if args.max_videos is not None and args.max_videos <= 0:
         parser.error("--max-videos must be a positive integer")
+    if args.max_videos is not None and (
+        args.start_index is not None or args.end_index is not None
+    ):
+        parser.error("--max-videos cannot be combined with --start-index/--end-index")
     if args.start_index is not None and args.start_index <= 0:
         parser.error("--start-index must be a positive integer")
     if args.end_index is not None and args.end_index <= 0:
