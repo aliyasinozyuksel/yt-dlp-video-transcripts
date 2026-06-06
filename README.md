@@ -231,7 +231,7 @@ python scripts/channel_transcripts.py \
 This uses yt-dlp flat extraction to list videos and writes:
 
 - `videos.json` — structured metadata for the selected videos
-- `videos.csv` — spreadsheet-friendly export with `index`, `id`, `title`, `url`, `upload_date`
+- `videos.csv` — spreadsheet-friendly export with `index`, `id`, `title`, `url`, `upload_date` (cells starting with `=`, `+`, `-`, or `@` are prefixed for spreadsheet safety)
 
 Useful before processing large channels to inspect or plan chunked runs. Combine with `--max-videos`, `--start-index`, or `--end-index` to limit the selection.
 
@@ -317,6 +317,7 @@ Would write files:      no
 | `--lang` | `en` | Comma-separated subtitle language priority list |
 | `--format` | `both` | Output transcript format: `both`, `txt`, or `md` |
 | `--timestamps` | off | Include subtitle cue start timestamps in transcript output |
+| `--progress-interval` | `10` | Write `progress.json` every N videos (also first, last, and errors) |
 | `--metadata-only` | off | Write selected video list metadata without downloading transcripts |
 | `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
@@ -347,11 +348,11 @@ output/
 ```
 
 - **videos.json** — selected video list metadata (written with `--metadata-only`)
-- **videos.csv** — CSV export of selected videos (written with `--metadata-only`)
+- **videos.csv** — CSV export of selected videos (written with `--metadata-only`); formula-like cells are prefixed to reduce spreadsheet injection risk
 - **txt/** — plain transcript text (written with `--format both` or `--format txt`)
 - **md/** — Markdown with YAML frontmatter (`title`, `url`, `upload_date`, `channel`, `video_id`; written with `--format both` or `--format md`)
 - **index.md** — table of all transcripts found on disk
-- **progress.json** — live run state, updated after each video
+- **progress.json** — live run state; written on the first video, every `--progress-interval` videos (default 10), on errors, and at the end of a run
 - **report.json** — latest run summary (`total_videos` + `total_channel_videos`)
 - **last_run_report.json** — copy of the latest run report
 - **cumulative_report.json** — merged progress across all chunks
