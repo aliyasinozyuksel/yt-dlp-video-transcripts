@@ -24,7 +24,7 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 DEFAULT_LANGS = ["en"]
 DEFAULT_OUTPUT_FORMAT = "both"
@@ -151,36 +151,116 @@ def retry_call(fn: Callable[[], T], attempts: int, delay: float, action: str) ->
     ) from last_exc
 
 
-def parse_subtitle_file(path: Path, *, keep_cues: bool = False) -> str:
+CUE_TIMESTAMP_RE = re.compile(
+    r"^(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s+-->",
+)
+
+
+def format_timestamp(raw: str) -> str:
+    normalized = raw.strip().replace(",", ".")
+    if "." in normalized:
+        normalized = normalized.split(".", 1)[0]
+
+    parts = normalized.split(":")
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return f"00:{int(minutes):02d}:{int(seconds):02d}"
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+    return normalized
+
+
+def _parse_cue_timestamp(line: str) -> str | None:
+    match = CUE_TIMESTAMP_RE.match(line.strip())
+    if not match:
+        return None
+    return format_timestamp(match.group(1))
+
+
+def parse_subtitle_file(
+    path: Path,
+    *,
+    keep_cues: bool = False,
+    timestamps: bool = False,
+) -> str:
     content = path.read_text(encoding="utf-8", errors="replace")
-    lines: list[str] = []
+
+    if not timestamps:
+        lines: list[str] = []
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("WEBVTT") or line.startswith("NOTE"):
+                continue
+            if re.match(r"^\d+$", line):
+                continue
+            if CUE_TIMESTAMP_RE.match(line):
+                continue
+            if line.startswith("Kind:") or line.startswith("Language:"):
+                continue
+
+            cleaned = clean_transcript_text(line, keep_cues=keep_cues)
+            if cleaned:
+                lines.append(cleaned)
+
+        merged: list[str] = []
+        for line in lines:
+            if merged and merged[-1] == line:
+                continue
+            merged.append(line)
+
+        return re.sub(r"\s+", " ", " ".join(merged)).strip()
+
+    cues: list[tuple[str, str]] = []
+    current_ts: str | None = None
+    current_lines: list[str] = []
+
+    def flush_cue() -> None:
+        nonlocal current_ts, current_lines
+        if current_ts and current_lines:
+            parts: list[str] = []
+            for cue_line in current_lines:
+                cleaned = clean_transcript_text(cue_line, keep_cues=keep_cues)
+                if cleaned:
+                    parts.append(cleaned)
+            if parts:
+                cues.append((current_ts, " ".join(parts)))
+        current_ts = None
+        current_lines = []
 
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line:
+            flush_cue()
             continue
         if line.startswith("WEBVTT") or line.startswith("NOTE"):
             continue
         if re.match(r"^\d+$", line):
             continue
-        if re.match(r"^\d{2}:\d{2}:\d{2}[.,]\d{3}\s+-->", line):
-            continue
-        if re.match(r"^\d{2}:\d{2}[.,]\d{3}\s+-->", line):
-            continue
         if line.startswith("Kind:") or line.startswith("Language:"):
             continue
 
-        cleaned = clean_transcript_text(line, keep_cues=keep_cues)
-        if cleaned:
-            lines.append(cleaned)
-
-    merged: list[str] = []
-    for line in lines:
-        if merged and merged[-1] == line:
+        cue_ts = _parse_cue_timestamp(line)
+        if cue_ts:
+            flush_cue()
+            current_ts = cue_ts
             continue
-        merged.append(line)
 
-    return re.sub(r"\s+", " ", " ".join(merged)).strip()
+        if current_ts is not None:
+            current_lines.append(line)
+
+    flush_cue()
+
+    merged_cues: list[tuple[str, str]] = []
+    for ts, text in cues:
+        if merged_cues and merged_cues[-1][1] == text:
+            continue
+        merged_cues.append((ts, text))
+
+    return "\n".join(f"[{ts}] {text}" for ts, text in merged_cues).strip()
 
 
 def list_channel_videos(channel_url: str) -> tuple[str, list[dict[str, Any]]]:
@@ -599,14 +679,21 @@ def build_md_content(
     channel: str,
     video_id: str,
     transcript: str,
+    *,
+    timestamps: bool = False,
 ) -> str:
-    lines = [
+    frontmatter = [
         "---",
         f"title: {yaml_str(title)}",
         f"url: {yaml_str(url)}",
         f"upload_date: {yaml_str(upload_date)}",
         f"channel: {yaml_str(channel)}",
         f"video_id: {yaml_str(video_id)}",
+    ]
+    if timestamps:
+        frontmatter.append("timestamps: true")
+    lines = [
+        *frontmatter,
         "---",
         "",
         f"# {title}",
@@ -872,6 +959,7 @@ def build_cumulative_report(
     txt_dir: Path,
     reports_dir: Path,
     output_format: OutputFormat = "both",
+    timestamps: bool = False,
 ) -> dict[str, Any]:
     completed = collect_completed_from_disk(md_dir, txt_dir, output_format)
     completed_ids = {item["id"] for item in completed if item.get("id")}
@@ -910,6 +998,7 @@ def build_cumulative_report(
         "total_channel_videos": total_channel_videos,
         "total_videos": total_channel_videos,
         "output_format": output_format,
+        "timestamps": timestamps,
         "completed_count": len(completed),
         "skipped_count": len(cumulative_skipped),
         "partial_repaired_count": partial_repaired_count,
@@ -1047,6 +1136,7 @@ def save_progress(
     manual_only: bool,
     requested_langs: list[str],
     output_format: OutputFormat,
+    timestamps: bool,
     retries: int,
     processed: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -1067,6 +1157,7 @@ def save_progress(
         "manual_only": manual_only,
         "requested_langs": requested_langs,
         "output_format": output_format,
+        "timestamps": timestamps,
         "retries": retries,
         "run_started_at": run_started_at,
         "last_updated_at": utc_now(),
@@ -1091,12 +1182,14 @@ def print_dry_run_summary(
     would_skip_existing_count: int,
     would_repair_partial_count: int,
     output_format: OutputFormat,
+    timestamps: bool,
     output_path: Path,
 ) -> None:
     print("\nDry run complete.")
     print(f"Total videos (channel): {total_channel_videos}")
     print(f"Videos in this run:     {run_videos}")
     print(f"Output format:          {output_format}")
+    print(f"Timestamps:             {'yes' if timestamps else 'no'}")
     print(f"Would process:          {would_process_count}")
     print(f"Would skip existing:    {would_skip_existing_count}")
     print(f"Would repair partial:   {would_repair_partial_count}")
@@ -1155,6 +1248,7 @@ def process_channel(
     requested_langs: list[str] | None = None,
     output_format: OutputFormat = "both",
     metadata_only: bool = False,
+    timestamps: bool = False,
 ) -> dict[str, Any]:
     if metadata_only:
         return process_metadata_only(
@@ -1213,6 +1307,8 @@ def process_channel(
     if dry_run:
         print("Dry run: yes")
     print(f"Output format: {output_format}")
+    if timestamps:
+        print("Timestamps: yes")
     if start_index is not None or end_index is not None:
         print(f"Index range: {start_index or 1}-{end_index or total_channel_videos}")
     elif max_videos is not None:
@@ -1313,6 +1409,7 @@ def process_channel(
                 manual_only=manual_only,
                 requested_langs=requested_langs,
                 output_format=output_format,
+                timestamps=timestamps,
                 retries=retries,
                 processed=processed,
                 skipped=skipped,
@@ -1371,6 +1468,7 @@ def process_channel(
                     manual_only=manual_only,
                     requested_langs=requested_langs,
                     output_format=output_format,
+                    timestamps=timestamps,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1396,7 +1494,11 @@ def process_channel(
                     action="Downloading subtitles",
                 )
                 if sub_path:
-                    transcript = parse_subtitle_file(sub_path, keep_cues=keep_cues)
+                    transcript = parse_subtitle_file(
+                        sub_path,
+                        keep_cues=keep_cues,
+                        timestamps=timestamps,
+                    )
 
             if not sub_path:
                 print(f"  -> skipped (failed to download {sub_type} subtitles)")
@@ -1422,6 +1524,7 @@ def process_channel(
                     manual_only=manual_only,
                     requested_langs=requested_langs,
                     output_format=output_format,
+                    timestamps=timestamps,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1456,6 +1559,7 @@ def process_channel(
                     manual_only=manual_only,
                     requested_langs=requested_langs,
                     output_format=output_format,
+                    timestamps=timestamps,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1478,6 +1582,7 @@ def process_channel(
                         channel=resolved_channel,
                         video_id=video_id,
                         transcript=transcript,
+                        timestamps=timestamps,
                     ),
                 )
 
@@ -1549,6 +1654,7 @@ def process_channel(
             manual_only=manual_only,
             requested_langs=requested_langs,
             output_format=output_format,
+            timestamps=timestamps,
             retries=retries,
             processed=processed,
             skipped=skipped,
@@ -1573,6 +1679,7 @@ def process_channel(
             "manual_only": manual_only,
             "requested_langs": requested_langs,
             "output_format": output_format,
+            "timestamps": timestamps,
             "would_process_count": would_process_count,
             "would_skip_existing_count": would_skip_existing_count,
             "would_repair_partial_count": would_repair_partial_count,
@@ -1590,6 +1697,7 @@ def process_channel(
             would_skip_existing_count=would_skip_existing_count,
             would_repair_partial_count=would_repair_partial_count,
             output_format=output_format,
+            timestamps=timestamps,
             output_path=base_dir,
         )
         return report
@@ -1616,6 +1724,7 @@ def process_channel(
         "manual_only": manual_only,
         "requested_langs": requested_langs,
         "output_format": output_format,
+        "timestamps": timestamps,
         "retries": retries,
         "run_started_at": run_started_at,
         "run_finished_at": utc_now(),
@@ -1649,6 +1758,7 @@ def process_channel(
         txt_dir=txt_dir,
         reports_dir=reports_dir,
         output_format=output_format,
+        timestamps=timestamps,
     )
     atomic_write_json(cumulative_report_path, cumulative_report)
     write_index_md(index_path, channel_name, index_items, output_format)
@@ -1761,6 +1871,11 @@ def main() -> int:
         action="store_true",
         help="Write selected video list metadata without downloading transcripts",
     )
+    parser.add_argument(
+        "--timestamps",
+        action="store_true",
+        help="Include subtitle cue start timestamps in transcript output",
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1804,6 +1919,7 @@ def main() -> int:
             requested_langs,
             args.format,
             args.metadata_only,
+            args.timestamps,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -197,6 +197,27 @@ Resume behavior depends on the requested format:
 - `txt` — complete when `.txt` exists (`.md` is not required)
 - `md` — complete when `.md` exists (`.txt` is not required)
 
+### Timestamped transcripts
+
+Include cue start timestamps in transcript output:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --timestamps
+```
+
+Each subtitle cue is written on its own line with the cue start time:
+
+```text
+[00:00:01] Hello everyone
+[00:00:05] Today we are going to talk about...
+```
+
+Works with `--format txt`, `--format md`, and `--format both`. Markdown output includes `timestamps: true` in the YAML frontmatter when enabled.
+
+If transcript files already exist, resume will skip them. Use `--force` or a separate output directory to regenerate existing transcripts with timestamps.
+
 ### Metadata only
 
 List selected videos without downloading subtitles or writing transcript files:
@@ -295,6 +316,7 @@ Would write files:      no
 | `--dry-run` | off | Preview planned actions; no downloads or file writes |
 | `--lang` | `en` | Comma-separated subtitle language priority list |
 | `--format` | `both` | Output transcript format: `both`, `txt`, or `md` |
+| `--timestamps` | off | Include subtitle cue start timestamps in transcript output |
 | `--metadata-only` | off | Write selected video list metadata without downloading transcripts |
 | `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
