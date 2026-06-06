@@ -23,9 +23,11 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 DEFAULT_LANGS = ["en"]
+DEFAULT_OUTPUT_FORMAT = "both"
+OutputFormat = Literal["both", "txt", "md"]
 CHANNEL_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/about")
 SUBTITLE_CUE_PATTERNS = [
     re.compile(r"\[Music\]", re.IGNORECASE),
@@ -35,6 +37,8 @@ SUBTITLE_CUE_PATTERNS = [
     re.compile(r"\[Submit subtitle corrections at[^\]]*\]", re.IGNORECASE),
 ]
 MD_INDEX_RE = re.compile(r"^(\d+)_.+\.md$")
+TXT_INDEX_RE = re.compile(r"^(\d+)_.+\.txt$")
+YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
 T = TypeVar("T")
 VideoAction = Literal["skip", "repair", "process"]
@@ -476,6 +480,43 @@ def parse_md_frontmatter(md_path: Path) -> dict[str, str]:
     return fields
 
 
+def transcript_file_fields(
+    output_format: OutputFormat,
+    txt_path: Path,
+    md_path: Path,
+    base_dir: Path,
+) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    if output_format in ("both", "txt"):
+        fields["txt_file"] = str(txt_path.relative_to(base_dir))
+    if output_format in ("both", "md"):
+        fields["md_file"] = str(md_path.relative_to(base_dir))
+    return fields
+
+
+def find_txt_file_for_video_id(txt_dir: Path, video_id: str) -> Path | None:
+    candidates = [
+        path
+        for path in txt_dir.glob(f"*_{video_id}.txt")
+        if TXT_INDEX_RE.match(path.name)
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates)[0]
+
+
+def find_txt_file_by_index_prefix(txt_dir: Path, global_index: int) -> Path | None:
+    prefix = f"{global_index:03d}_"
+    candidates = [
+        path
+        for path in txt_dir.glob(f"{prefix}*.txt")
+        if TXT_INDEX_RE.match(path.name)
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def build_existing_files_index(
     md_dir: Path,
     txt_dir: Path,
@@ -498,16 +539,46 @@ def build_existing_files_index(
             "index": int(match.group(1)) if match else 0,
             "title": meta.get("title") or basename,
         }
+
+    for txt_path in txt_dir.glob("*.txt"):
+        if not TXT_INDEX_RE.match(txt_path.name):
+            continue
+
+        basename = txt_path.stem
+        md_path = md_dir / f"{basename}.md"
+        if md_path.exists():
+            continue
+
+        video_id: str | None = None
+        if "_" in basename:
+            suffix = basename.rsplit("_", 1)[-1]
+            if YOUTUBE_ID_RE.fullmatch(suffix):
+                video_id = suffix
+
+        if video_id and video_id not in index:
+            match = TXT_INDEX_RE.match(txt_path.name)
+            index[video_id] = {
+                "video_id": video_id,
+                "basename": basename,
+                "txt_path": txt_path,
+                "md_path": md_path,
+                "index": int(match.group(1)) if match else 0,
+                "title": basename,
+            }
+
     return index
 
 
 def resolve_video_action(
     video_id: str,
+    global_index: int,
     proposed_basename: str,
     proposed_txt_path: Path,
     proposed_md_path: Path,
     existing_by_id: dict[str, dict[str, Any]],
+    txt_dir: Path,
     force: bool,
+    output_format: OutputFormat = "both",
 ) -> tuple[VideoAction, Path, Path, str, bool]:
     entry = existing_by_id.get(video_id)
     if entry:
@@ -519,12 +590,34 @@ def resolve_video_action(
         md_path = proposed_md_path
         basename = proposed_basename
 
+        txt_fallback = find_txt_file_for_video_id(txt_dir, video_id)
+        if txt_fallback is None:
+            txt_fallback = find_txt_file_by_index_prefix(txt_dir, global_index)
+        if txt_fallback is not None:
+            txt_path = txt_fallback
+            basename = txt_fallback.stem
+            md_path = md_path.parent / f"{basename}.md"
+
     txt_exists = txt_path.exists()
     md_exists = md_path.exists()
 
-    if not force and txt_exists and md_exists:
+    if output_format == "both":
+        if not force and txt_exists and md_exists:
+            return "skip", txt_path, md_path, basename, False
+        if not force and (txt_exists or md_exists):
+            return "repair", txt_path, md_path, basename, True
+        return "process", txt_path, md_path, basename, False
+
+    if output_format == "txt":
+        if not force and txt_exists:
+            return "skip", txt_path, md_path, basename, False
+        if not force and md_exists and not txt_exists:
+            return "repair", txt_path, md_path, basename, True
+        return "process", txt_path, md_path, basename, False
+
+    if not force and md_exists:
         return "skip", txt_path, md_path, basename, False
-    if not force and (txt_exists or md_exists):
+    if not force and txt_exists and not md_exists:
         return "repair", txt_path, md_path, basename, True
     return "process", txt_path, md_path, basename, False
 
@@ -550,22 +643,24 @@ def run_report_filename(
     return f"report_001_{total_channel_videos:03d}.json"
 
 
-def collect_completed_from_disk(md_dir: Path, txt_dir: Path) -> list[dict[str, Any]]:
+def collect_completed_from_disk(
+    md_dir: Path,
+    txt_dir: Path,
+    output_format: OutputFormat = "both",
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for md_path in md_dir.glob("*.md"):
-        match = MD_INDEX_RE.match(md_path.name)
-        if not match:
-            continue
 
-        basename = md_path.stem
-        txt_path = txt_dir / f"{basename}.txt"
-        if not txt_path.exists():
-            continue
+    if output_format == "txt":
+        for txt_path in txt_dir.glob("*.txt"):
+            match = TXT_INDEX_RE.match(txt_path.name)
+            if not match:
+                continue
 
-        file_index = int(match.group(1))
-        meta = parse_md_frontmatter(md_path)
-        items.append(
-            {
+            basename = txt_path.stem
+            file_index = int(match.group(1))
+            md_path = md_dir / f"{basename}.md"
+            meta = parse_md_frontmatter(md_path) if md_path.exists() else {}
+            item: dict[str, Any] = {
                 "index": file_index,
                 "id": meta.get("video_id") or "",
                 "title": meta.get("title") or basename,
@@ -573,9 +668,36 @@ def collect_completed_from_disk(md_dir: Path, txt_dir: Path) -> list[dict[str, A
                 "upload_date": meta.get("upload_date") or "",
                 "basename": basename,
                 "txt_file": str(txt_path.relative_to(txt_dir.parent)),
-                "md_file": str(md_path.relative_to(md_dir.parent)),
             }
-        )
+            if md_path.exists():
+                item["md_file"] = str(md_path.relative_to(md_dir.parent))
+            items.append(item)
+        return sorted(items, key=lambda row: row["index"])
+
+    for md_path in md_dir.glob("*.md"):
+        match = MD_INDEX_RE.match(md_path.name)
+        if not match:
+            continue
+
+        basename = md_path.stem
+        txt_path = txt_dir / f"{basename}.txt"
+        if output_format == "both" and not txt_path.exists():
+            continue
+
+        file_index = int(match.group(1))
+        meta = parse_md_frontmatter(md_path)
+        item = {
+            "index": file_index,
+            "id": meta.get("video_id") or "",
+            "title": meta.get("title") or basename,
+            "url": meta.get("url") or "",
+            "upload_date": meta.get("upload_date") or "",
+            "basename": basename,
+            "md_file": str(md_path.relative_to(md_dir.parent)),
+        }
+        if txt_path.exists():
+            item["txt_file"] = str(txt_path.relative_to(txt_dir.parent))
+        items.append(item)
 
     return sorted(items, key=lambda row: row["index"])
 
@@ -589,8 +711,9 @@ def build_cumulative_report(
     md_dir: Path,
     txt_dir: Path,
     reports_dir: Path,
+    output_format: OutputFormat = "both",
 ) -> dict[str, Any]:
-    completed = collect_completed_from_disk(md_dir, txt_dir)
+    completed = collect_completed_from_disk(md_dir, txt_dir, output_format)
     completed_ids = {item["id"] for item in completed if item.get("id")}
 
     skipped_by_id: dict[str, dict[str, Any]] = {}
@@ -626,6 +749,7 @@ def build_cumulative_report(
         "channel_name": channel_name,
         "total_channel_videos": total_channel_videos,
         "total_videos": total_channel_videos,
+        "output_format": output_format,
         "completed_count": len(completed),
         "skipped_count": len(cumulative_skipped),
         "partial_repaired_count": partial_repaired_count,
@@ -638,8 +762,40 @@ def build_cumulative_report(
     }
 
 
-def collect_index_items_from_disk(md_dir: Path) -> list[dict[str, Any]]:
+def collect_index_items_from_disk(
+    md_dir: Path,
+    txt_dir: Path,
+    output_format: OutputFormat = "both",
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+
+    if output_format == "txt":
+        for txt_path in txt_dir.glob("*.txt"):
+            match = TXT_INDEX_RE.match(txt_path.name)
+            if not match:
+                continue
+
+            file_index = int(match.group(1))
+            basename = txt_path.stem
+            md_path = md_dir / f"{basename}.md"
+            if md_path.exists():
+                meta = parse_md_frontmatter(md_path)
+                title = meta.get("title") or basename
+                upload_date = meta.get("upload_date") or ""
+            else:
+                title = basename
+                upload_date = ""
+            items.append(
+                {
+                    "index": file_index,
+                    "title": title,
+                    "upload_date": upload_date,
+                    "basename": basename,
+                    "link_ext": "txt",
+                }
+            )
+        return sorted(items, key=lambda row: row["index"])
+
     for md_path in md_dir.glob("*.md"):
         match = MD_INDEX_RE.match(md_path.name)
         if not match:
@@ -654,13 +810,20 @@ def collect_index_items_from_disk(md_dir: Path) -> list[dict[str, Any]]:
                 "title": meta.get("title") or basename,
                 "upload_date": meta.get("upload_date") or "",
                 "basename": basename,
+                "link_ext": "md",
             }
         )
 
     return sorted(items, key=lambda row: row["index"])
 
 
-def write_index_md(path: Path, channel: str, index_items: list[dict[str, Any]]) -> None:
+def write_index_md(
+    path: Path,
+    channel: str,
+    index_items: list[dict[str, Any]],
+    output_format: OutputFormat = "both",
+) -> None:
+    link_ext = "txt" if output_format == "txt" else "md"
     lines = [
         f"# {channel} — Transcript Index",
         "",
@@ -672,9 +835,10 @@ def write_index_md(path: Path, channel: str, index_items: list[dict[str, Any]]) 
     for item in index_items:
         date = md_table_cell(item.get("upload_date") or "-")
         title = md_table_cell(item["title"])
-        file_label = md_table_cell(f"{item['basename']}.md")
+        file_label = md_table_cell(f"{item['basename']}.{link_ext}")
         lines.append(
-            f"| {item['index']:03d} | {title} | {date} | [{file_label}](md/{item['basename']}.md) |"
+            f"| {item['index']:03d} | {title} | {date} | "
+            f"[{file_label}]({link_ext}/{item['basename']}.{link_ext}) |"
         )
     lines.append("")
     atomic_write_text(path, "\n".join(lines))
@@ -722,6 +886,7 @@ def save_progress(
     force: bool,
     manual_only: bool,
     requested_langs: list[str],
+    output_format: OutputFormat,
     retries: int,
     processed: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -741,6 +906,7 @@ def save_progress(
         "forced": force,
         "manual_only": manual_only,
         "requested_langs": requested_langs,
+        "output_format": output_format,
         "retries": retries,
         "run_started_at": run_started_at,
         "last_updated_at": utc_now(),
@@ -764,11 +930,13 @@ def print_dry_run_summary(
     would_process_count: int,
     would_skip_existing_count: int,
     would_repair_partial_count: int,
+    output_format: OutputFormat,
     output_path: Path,
 ) -> None:
     print("\nDry run complete.")
     print(f"Total videos (channel): {total_channel_videos}")
     print(f"Videos in this run:     {run_videos}")
+    print(f"Output format:          {output_format}")
     print(f"Would process:          {would_process_count}")
     print(f"Would skip existing:    {would_skip_existing_count}")
     print(f"Would repair partial:   {would_repair_partial_count}")
@@ -825,6 +993,7 @@ def process_channel(
     dry_run: bool = False,
     manual_only: bool = False,
     requested_langs: list[str] | None = None,
+    output_format: OutputFormat = "both",
 ) -> dict[str, Any]:
     if requested_langs is None:
         requested_langs = list(DEFAULT_LANGS)
@@ -872,6 +1041,7 @@ def process_channel(
     print(f"Videos in this run: {run_videos}")
     if dry_run:
         print("Dry run: yes")
+    print(f"Output format: {output_format}")
     if start_index is not None or end_index is not None:
         print(f"Index range: {start_index or 1}-{end_index or total_channel_videos}")
     elif max_videos is not None:
@@ -891,11 +1061,14 @@ def process_channel(
 
         action, txt_path, md_path, basename, partial_repair = resolve_video_action(
             video_id,
+            global_index,
             proposed_basename,
             proposed_txt_path,
             proposed_md_path,
             existing_by_id,
+            txt_dir,
             force,
+            output_format,
         )
 
         if dry_run:
@@ -944,18 +1117,18 @@ def process_channel(
 
         if action == "skip":
             print("  -> skipped (already exists)")
-            skipped.append(
-                {
-                    "index": global_index,
-                    "id": video_id,
-                    "title": title,
-                    "url": video_url,
-                    "reason": "already_exists",
-                    "basename": basename,
-                    "txt_file": str(txt_path.relative_to(base_dir)),
-                    "md_file": str(md_path.relative_to(base_dir)),
-                }
+            skip_entry: dict[str, Any] = {
+                "index": global_index,
+                "id": video_id,
+                "title": title,
+                "url": video_url,
+                "reason": "already_exists",
+                "basename": basename,
+            }
+            skip_entry.update(
+                transcript_file_fields(output_format, txt_path, md_path, base_dir)
             )
+            skipped.append(skip_entry)
             save_progress(
                 progress_path,
                 channel_url=channel_url,
@@ -968,6 +1141,7 @@ def process_channel(
                 force=force,
                 manual_only=manual_only,
                 requested_langs=requested_langs,
+                output_format=output_format,
                 retries=retries,
                 processed=processed,
                 skipped=skipped,
@@ -1025,6 +1199,7 @@ def process_channel(
                     force=force,
                     manual_only=manual_only,
                     requested_langs=requested_langs,
+                    output_format=output_format,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1075,6 +1250,7 @@ def process_channel(
                     force=force,
                     manual_only=manual_only,
                     requested_langs=requested_langs,
+                    output_format=output_format,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1108,6 +1284,7 @@ def process_channel(
                     force=force,
                     manual_only=manual_only,
                     requested_langs=requested_langs,
+                    output_format=output_format,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1118,18 +1295,20 @@ def process_channel(
                     time.sleep(delay)
                 continue
 
-            atomic_write_text(txt_path, build_txt_content(transcript))
-            atomic_write_text(
-                md_path,
-                build_md_content(
-                    title=resolved_title,
-                    url=video_url,
-                    upload_date=upload_date,
-                    channel=resolved_channel,
-                    video_id=video_id,
-                    transcript=transcript,
-                ),
-            )
+            if output_format in ("both", "txt"):
+                atomic_write_text(txt_path, build_txt_content(transcript))
+            if output_format in ("both", "md"):
+                atomic_write_text(
+                    md_path,
+                    build_md_content(
+                        title=resolved_title,
+                        url=video_url,
+                        upload_date=upload_date,
+                        channel=resolved_channel,
+                        video_id=video_id,
+                        transcript=transcript,
+                    ),
+                )
 
             existing_by_id[video_id] = {
                 "video_id": video_id,
@@ -1149,9 +1328,10 @@ def process_channel(
                 "basename": basename,
                 "subtitle_lang": lang,
                 "subtitle_type": sub_type,
-                "txt_file": str(txt_path.relative_to(base_dir)),
-                "md_file": str(md_path.relative_to(base_dir)),
             }
+            processed_entry.update(
+                transcript_file_fields(output_format, txt_path, md_path, base_dir)
+            )
             if partial_repair:
                 processed_entry["partial_repaired"] = True
             processed.append(processed_entry)
@@ -1197,6 +1377,7 @@ def process_channel(
             force=force,
             manual_only=manual_only,
             requested_langs=requested_langs,
+            output_format=output_format,
             retries=retries,
             processed=processed,
             skipped=skipped,
@@ -1220,6 +1401,7 @@ def process_channel(
             "keep_cues": keep_cues,
             "manual_only": manual_only,
             "requested_langs": requested_langs,
+            "output_format": output_format,
             "would_process_count": would_process_count,
             "would_skip_existing_count": would_skip_existing_count,
             "would_repair_partial_count": would_repair_partial_count,
@@ -1236,13 +1418,14 @@ def process_channel(
             would_process_count=would_process_count,
             would_skip_existing_count=would_skip_existing_count,
             would_repair_partial_count=would_repair_partial_count,
+            output_format=output_format,
             output_path=base_dir,
         )
         return report
 
     skip_counts = count_skip_reasons(skipped)
     partial_repaired_count = count_partial_repaired(processed)
-    index_items = collect_index_items_from_disk(md_dir)
+    index_items = collect_index_items_from_disk(md_dir, txt_dir, output_format)
 
     report: dict[str, Any] = {
         "channel_url": channel_url,
@@ -1261,6 +1444,7 @@ def process_channel(
         "keep_cues": keep_cues,
         "manual_only": manual_only,
         "requested_langs": requested_langs,
+        "output_format": output_format,
         "retries": retries,
         "run_started_at": run_started_at,
         "run_finished_at": utc_now(),
@@ -1293,9 +1477,10 @@ def process_channel(
         md_dir=md_dir,
         txt_dir=txt_dir,
         reports_dir=reports_dir,
+        output_format=output_format,
     )
     atomic_write_json(cumulative_report_path, cumulative_report)
-    write_index_md(index_path, channel_name, index_items)
+    write_index_md(index_path, channel_name, index_items, output_format)
 
     print_final_summary(
         total_channel_videos=total_channel_videos,
@@ -1394,6 +1579,12 @@ def main() -> int:
         default="en",
         help="Comma-separated subtitle language priority list (default: en)",
     )
+    parser.add_argument(
+        "--format",
+        choices=["both", "txt", "md"],
+        default=DEFAULT_OUTPUT_FORMAT,
+        help="Output transcript format: both, txt, or md (default: both)",
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1435,6 +1626,7 @@ def main() -> int:
             args.dry_run,
             args.manual_only,
             requested_langs,
+            args.format,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -71,10 +71,12 @@ def test_resolve_video_action_skip_complete(tmp_path: Path):
     existing = ct.build_existing_files_index(tmp_path / "md", tmp_path / "txt")
     action, txt_path, md_path, basename, partial = ct.resolve_video_action(
         "vid1",
+        1,
         "001_new-title",
         tmp_path / "txt" / "001_new-title.txt",
         tmp_path / "md" / "001_new-title.md",
         existing,
+        tmp_path / "txt",
         force=False,
     )
     assert action == "skip"
@@ -96,10 +98,12 @@ def test_resolve_video_action_repair_partial_txt_only(tmp_path: Path):
     existing = ct.build_existing_files_index(tmp_path / "md", tmp_path / "txt")
     action, _, _, _, partial = ct.resolve_video_action(
         "vid2",
+        2,
         "002_partial",
         tmp_path / "txt" / "002_partial.txt",
         tmp_path / "md" / "002_partial.md",
         existing,
+        tmp_path / "txt",
         force=False,
     )
     assert action == "repair"
@@ -118,10 +122,12 @@ def test_resolve_video_action_repair_partial_md_only_by_video_id(tmp_path: Path)
     existing = ct.build_existing_files_index(tmp_path / "md", tmp_path / "txt")
     action, txt_path, md_path, basename, partial = ct.resolve_video_action(
         "vid4",
+        4,
         "004_other-slug",
         tmp_path / "txt" / "004_other-slug.txt",
         tmp_path / "md" / "004_other-slug.md",
         existing,
+        tmp_path / "txt",
         force=False,
     )
     assert action == "repair"
@@ -136,10 +142,12 @@ def test_resolve_video_action_skip_by_video_id_when_title_changes(tmp_path: Path
     existing = ct.build_existing_files_index(tmp_path / "md", tmp_path / "txt")
     action, txt_path, md_path, basename, _ = ct.resolve_video_action(
         "vid3",
+        3,
         "003_completely-different-title",
         tmp_path / "txt" / "003_completely-different-title.txt",
         tmp_path / "md" / "003_completely-different-title.md",
         existing,
+        tmp_path / "txt",
         force=False,
     )
     assert action == "skip"
