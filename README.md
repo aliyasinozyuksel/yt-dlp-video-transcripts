@@ -4,14 +4,15 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Download English subtitles/transcripts from YouTube channels, playlists, or individual videos and save them as plain `.txt` and agent-friendly `.md` files.
+Download subtitles/transcripts from YouTube channels, playlists, or individual videos and save them as plain `.txt` and agent-friendly `.md` files. English is the default language, but you can request any YouTube/yt-dlp subtitle language code with `--lang`.
 
 This tool uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to fetch subtitles only. It does **not** download video or audio files.
 
 ## What it does
 
 - Lists videos from a channel, playlist, or single video URL
-- Downloads English manual subtitles first, then English auto-generated captions
+- Downloads manual subtitles first, then auto-generated captions for your requested language(s)
+- Defaults to English (`--lang en`); accepts any valid YouTube subtitle language code
 - Converts VTT/SRT subtitles into clean transcript text
 - Writes both `.txt` and `.md` outputs with YAML frontmatter
 - Supports chunked processing for large channels (600+ videos)
@@ -129,14 +130,49 @@ python scripts/channel_transcripts.py \
   -o ./output --keep-cues
 ```
 
+### Language selection
+
+`--lang` accepts a comma-separated priority list. For each video, the tool downloads **one** transcript using the first matching language in your list — it does not download multiple transcripts per video.
+
+Priority order for `--lang en,tr`:
+
+1. Manual English candidates
+2. Manual Turkish candidates
+3. Auto English candidates (unless `--manual-only`)
+4. Auto Turkish candidates
+
+Examples:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --lang tr
+```
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --lang tr,en
+```
+
+Regional variants are handled automatically (for example `en` also tries `en-US`, `en-GB`; `pt` tries `pt-BR` and `pt-PT`; `zh` tries `zh-Hans`, `zh-Hant`, and related codes).
+
 ### Manual subtitles only
 
-By default, the tool uses manual English subtitles first, then falls back to English auto-generated captions. With `--manual-only`, auto captions are ignored and videos without manual English subtitles are skipped.
+By default, the tool uses manual subtitles first, then falls back to auto-generated captions for the requested languages. With `--manual-only`, auto captions are ignored and videos without manual subtitles in any requested language are skipped.
 
 ```bash
 python scripts/channel_transcripts.py \
   "https://www.youtube.com/@channel/videos" \
   -o ./output --manual-only
+```
+
+Combine with `--lang` to restrict manual-only mode to specific languages:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --lang tr,en --manual-only
 ```
 
 ### Dry run (preview without downloading)
@@ -215,7 +251,8 @@ Would write files:      no
 | `--force` | off | Overwrite existing transcript files |
 | `--keep-cues` | off | Preserve bracketed subtitle cues |
 | `--dry-run` | off | Preview planned actions; no downloads or file writes |
-| `--manual-only` | off | Use only manual English subtitles; no auto caption fallback |
+| `--lang` | `en` | Comma-separated subtitle language priority list |
+| `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
 
 If either `--start-index` or `--end-index` is set, the index range takes priority over `--max-videos`.
@@ -282,7 +319,8 @@ python -m ruff check .
 | `yt-dlp is not installed` | Run `pip install yt-dlp` |
 | `No videos found for the provided URL` | Check the URL and make sure the channel/playlist is public |
 | `The selected range contains no videos` | Adjust `--start-index` / `--end-index` |
-| `skipped (no English subtitles)` | That video has no English manual or auto captions |
+| `skipped (no requested subtitles)` | That video has no manual or auto captions in any requested language |
+| `skipped (no manual subtitles for requested language)` | With `--manual-only`, no manual subtitles matched the requested languages |
 | `Fetching video metadata failed after N attempt(s)` | Retry later or increase `--retries` and `--retry-delay` |
 | Interrupted run | Re-run the same command; completed files are skipped, partial files are repaired |
 
