@@ -57,8 +57,8 @@ def test_pick_english_subtitle_manual_only_returns_none_when_only_auto():
 
 
 def test_subtitle_skip_reason_manual_only():
-    assert ct.subtitle_skip_reason(True) == "no_manual_english_subtitles"
-    assert ct.subtitle_skip_reason(False) == "no_english_subtitles"
+    assert ct.subtitle_skip_reason(True) == "no_manual_requested_subtitles"
+    assert ct.subtitle_skip_reason(False) == "no_requested_subtitles"
 
 
 def test_manual_only_skips_with_correct_reason(tmp_path: Path, monkeypatch):
@@ -99,7 +99,7 @@ def test_manual_only_skips_with_correct_reason(tmp_path: Path, monkeypatch):
 
     assert report["manual_only"] is True
     assert len(report["skipped"]) == 1
-    assert report["skipped"][0]["reason"] == "no_manual_english_subtitles"
+    assert report["skipped"][0]["reason"] == "no_manual_requested_subtitles"
     assert not (output_dir / "test-channel" / "txt").exists() or not list(
         (output_dir / "test-channel" / "txt").glob("*.txt")
     )

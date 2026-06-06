@@ -23,9 +23,9 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
-EN_SUB_LANGS = ["en", "en-US", "en-GB", "en-orig"]
+DEFAULT_LANGS = ["en"]
 CHANNEL_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/about")
 SUBTITLE_CUE_PATTERNS = [
     re.compile(r"\[Music\]", re.IGNORECASE),
@@ -258,44 +258,118 @@ def fetch_video_metadata(video_url: str) -> dict[str, Any]:
         return ydl.extract_info(video_url, download=False)
 
 
+def parse_langs(value: str) -> list[str]:
+    parts = [part.strip() for part in value.split(",")]
+    langs: list[str] = []
+    for part in parts:
+        if part and part not in langs:
+            langs.append(part)
+    if not langs:
+        raise UserError("At least one language must be provided in --lang.")
+    return langs
+
+
+def _known_static_candidates(lang: str) -> list[str]:
+    base = lang.split("-")[0]
+    ordered: list[str] = []
+
+    def add(code: str) -> None:
+        if code and code not in ordered:
+            ordered.append(code)
+
+    add(lang)
+
+    if base == "en":
+        for code in ("en", "en-US", "en-GB", "en-orig"):
+            add(code)
+    elif base == "tr":
+        for code in ("tr", "tr-TR", "tr-orig"):
+            add(code)
+    elif base == "pt":
+        for code in ("pt", "pt-BR", "pt-PT", "pt-orig"):
+            add(code)
+    elif base == "zh":
+        for code in ("zh", "zh-Hans", "zh-Hant", "zh-CN", "zh-TW", "zh-orig"):
+            add(code)
+    else:
+        add(f"{lang}-orig")
+        if base != lang:
+            add(base)
+            add(f"{base}-orig")
+
+    return ordered
+
+
+def language_candidates(lang: str, available_keys: list[str] | None = None) -> list[str]:
+    lang = lang.strip()
+    ordered = _known_static_candidates(lang)
+    if available_keys is None:
+        return ordered
+
+    available_set = set(available_keys)
+    matched: list[str] = []
+    for code in ordered:
+        if code in available_set and code not in matched:
+            matched.append(code)
+
+    prefix = lang.split("-")[0]
+    for code in sorted(available_keys):
+        if code.startswith(prefix) and code not in matched:
+            matched.append(code)
+
+    return matched
+
+
+def pick_subtitle(
+    subtitles: dict,
+    automatic_captions: dict,
+    requested_langs: list[str],
+    *,
+    manual_only: bool = False,
+) -> tuple[str | None, str | None]:
+    manual_keys = list(subtitles.keys())
+    auto_keys = list(automatic_captions.keys())
+
+    for requested in requested_langs:
+        for candidate in language_candidates(requested, manual_keys):
+            if candidate in subtitles:
+                return candidate, "manual"
+
+    if manual_only:
+        return None, None
+
+    for requested in requested_langs:
+        for candidate in language_candidates(requested, auto_keys):
+            if candidate in automatic_captions:
+                return candidate, "auto"
+
+    return None, None
+
+
 def pick_english_subtitle(
     subtitles: dict,
     automatic_captions: dict,
     *,
     manual_only: bool = False,
 ) -> tuple[str | None, str | None]:
-    for lang in EN_SUB_LANGS:
-        if lang in subtitles:
-            return lang, "manual"
-
-    for lang in subtitles:
-        if lang.startswith("en"):
-            return lang, "manual"
-
-    if manual_only:
-        return None, None
-
-    for lang in EN_SUB_LANGS:
-        if lang in automatic_captions:
-            return lang, "auto"
-
-    for lang in automatic_captions:
-        if lang.startswith("en"):
-            return lang, "auto"
-
-    return None, None
+    return pick_subtitle(
+        subtitles,
+        automatic_captions,
+        DEFAULT_LANGS,
+        manual_only=manual_only,
+    )
 
 
 def subtitle_skip_reason(manual_only: bool) -> str:
     if manual_only:
-        return "no_manual_english_subtitles"
-    return "no_english_subtitles"
+        return "no_manual_requested_subtitles"
+    return "no_requested_subtitles"
 
 
 def subtitle_skip_message(manual_only: bool) -> str:
     if manual_only:
-        return "no manual English subtitles"
-    return "no English subtitles"
+        return "no manual subtitles for requested language"
+    return "no requested subtitles"
 
 
 def find_subtitle_file(out_dir: Path, video_id: str, lang: str) -> Path | None:
@@ -647,6 +721,7 @@ def save_progress(
     max_videos: int | None,
     force: bool,
     manual_only: bool,
+    requested_langs: list[str],
     retries: int,
     processed: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -665,6 +740,7 @@ def save_progress(
         "max_videos": max_videos,
         "forced": force,
         "manual_only": manual_only,
+        "requested_langs": requested_langs,
         "retries": retries,
         "run_started_at": run_started_at,
         "last_updated_at": utc_now(),
@@ -748,7 +824,10 @@ def process_channel(
     keep_cues: bool = False,
     dry_run: bool = False,
     manual_only: bool = False,
+    requested_langs: list[str] | None = None,
 ) -> dict[str, Any]:
+    if requested_langs is None:
+        requested_langs = list(DEFAULT_LANGS)
     channel_name, all_videos = list_channel_videos(channel_url)
     total_channel_videos = len(all_videos)
 
@@ -888,6 +967,7 @@ def process_channel(
                 max_videos=max_videos,
                 force=force,
                 manual_only=manual_only,
+                requested_langs=requested_langs,
                 retries=retries,
                 processed=processed,
                 skipped=skipped,
@@ -915,9 +995,10 @@ def process_channel(
 
             subtitles = metadata.get("subtitles") or {}
             automatic_captions = metadata.get("automatic_captions") or {}
-            lang, sub_type = pick_english_subtitle(
+            lang, sub_type = pick_subtitle(
                 subtitles,
                 automatic_captions,
+                requested_langs,
                 manual_only=manual_only,
             )
 
@@ -943,6 +1024,7 @@ def process_channel(
                     max_videos=max_videos,
                     force=force,
                     manual_only=manual_only,
+                    requested_langs=requested_langs,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -992,6 +1074,7 @@ def process_channel(
                     max_videos=max_videos,
                     force=force,
                     manual_only=manual_only,
+                    requested_langs=requested_langs,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1024,6 +1107,7 @@ def process_channel(
                     max_videos=max_videos,
                     force=force,
                     manual_only=manual_only,
+                    requested_langs=requested_langs,
                     retries=retries,
                     processed=processed,
                     skipped=skipped,
@@ -1112,6 +1196,7 @@ def process_channel(
             max_videos=max_videos,
             force=force,
             manual_only=manual_only,
+            requested_langs=requested_langs,
             retries=retries,
             processed=processed,
             skipped=skipped,
@@ -1134,6 +1219,7 @@ def process_channel(
             "forced": force,
             "keep_cues": keep_cues,
             "manual_only": manual_only,
+            "requested_langs": requested_langs,
             "would_process_count": would_process_count,
             "would_skip_existing_count": would_skip_existing_count,
             "would_repair_partial_count": would_repair_partial_count,
@@ -1174,6 +1260,7 @@ def process_channel(
         "forced": force,
         "keep_cues": keep_cues,
         "manual_only": manual_only,
+        "requested_langs": requested_langs,
         "retries": retries,
         "run_started_at": run_started_at,
         "run_finished_at": utc_now(),
@@ -1232,7 +1319,7 @@ def process_channel(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Download English transcripts from a YouTube channel and save as txt/md.",
+        description="Download transcripts from a YouTube channel and save as txt/md.",
     )
     parser.add_argument(
         "--version",
@@ -1300,7 +1387,12 @@ def main() -> int:
     parser.add_argument(
         "--manual-only",
         action="store_true",
-        help="Use only manual English subtitles; do not fall back to auto captions",
+        help="Use only manual subtitles for requested languages; no auto caption fallback",
+    )
+    parser.add_argument(
+        "--lang",
+        default="en",
+        help="Comma-separated subtitle language priority list (default: en)",
     )
     args = parser.parse_args()
 
@@ -1328,6 +1420,7 @@ def main() -> int:
 
     try:
         require_yt_dlp()
+        requested_langs = parse_langs(args.lang)
         process_channel(
             args.channel_url,
             output_dir,
@@ -1341,6 +1434,7 @@ def main() -> int:
             args.keep_cues,
             args.dry_run,
             args.manual_only,
+            requested_langs,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)
