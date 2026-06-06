@@ -322,7 +322,7 @@ Would write files:      no
 | `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
 
-If either `--start-index` or `--end-index` is set, the index range takes priority over `--max-videos`.
+`--max-videos` cannot be combined with `--start-index` or `--end-index`. Use one selection method per run.
 
 ## Output structure
 
@@ -375,6 +375,13 @@ Pass the tab you want explicitly:
 - `https://www.youtube.com/@channel/streams`
 
 If you process multiple tabs into the same output folder, numbering can collide. Use separate output directories per tab.
+
+## Limitations and safety notes
+
+- **Metadata-only** uses yt-dlp flat extraction, so `upload_date` may be empty in `videos.json` / `videos.csv`.
+- **Resume** does not overwrite existing transcript files unless you pass `--force` or use a separate output directory.
+- **`--lang`** is a priority list and downloads one transcript per video, not multiple languages per video.
+- **`videos.csv`** prefixes spreadsheet formula-like cells (`=`, `+`, `-`, `@`) to reduce CSV injection risk when opened in Excel or similar apps.
 
 ## Development
 
