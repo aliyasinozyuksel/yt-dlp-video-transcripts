@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -15,6 +17,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import yt_dlp
@@ -24,10 +27,11 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 DEFAULT_LANGS = ["en"]
 DEFAULT_OUTPUT_FORMAT = "both"
+DEFAULT_PROGRESS_INTERVAL = 10
 OutputFormat = Literal["both", "txt", "md"]
 CHANNEL_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/about")
 SUBTITLE_CUE_PATTERNS = [
@@ -66,14 +70,23 @@ def require_yt_dlp() -> None:
 
 
 def normalize_channel_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    if "watch?v=" in url or "playlist?list=" in url:
+    url = url.strip()
+    if not url:
         return url
-    if "/@" in url and not any(url.endswith(suffix) for suffix in CHANNEL_TAB_SUFFIXES):
-        return f"{url}/videos"
-    if "/channel/" in url and not any(url.endswith(suffix) for suffix in CHANNEL_TAB_SUFFIXES):
-        return f"{url}/videos"
-    return url
+
+    if "watch?v=" in url or "playlist?list=" in url:
+        return url.rstrip("/")
+
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    has_tab_suffix = any(path.endswith(suffix) for suffix in CHANNEL_TAB_SUFFIXES)
+
+    if "/@" in path and not has_tab_suffix:
+        path = f"{path}/videos"
+    elif "/channel/" in path and not has_tab_suffix:
+        path = f"{path}/videos"
+
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def resolve_video_url(entry: dict[str, Any], video_id: str) -> str:
@@ -127,9 +140,26 @@ def clean_transcript_text(text: str, *, keep_cues: bool = False) -> str:
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd: int | None = None
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            handle.write(content)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -377,15 +407,23 @@ def write_videos_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload)
 
 
+def safe_csv_cell(value: Any) -> str:
+    text = str(value)
+    if text and text[0] in ("=", "+", "-", "@"):
+        return f"'{text}"
+    return text
+
+
 def write_videos_csv(path: Path, videos: list[dict[str, Any]]) -> None:
     fieldnames = ["index", "id", "title", "url", "upload_date"]
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for video in videos:
-            writer.writerow({field: video[field] for field in fieldnames})
-    tmp_path.replace(path)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for video in videos:
+        writer.writerow(
+            {field: safe_csv_cell(video[field]) for field in fieldnames}
+        )
+    atomic_write_text(path, buffer.getvalue())
 
 
 def print_metadata_only_summary(
@@ -704,6 +742,16 @@ def build_md_content(
     return "\n".join(lines)
 
 
+def frontmatter_value_to_str(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if value is None:
+        return ""
+    return str(value)
+
+
 def parse_md_frontmatter(md_path: Path) -> dict[str, str]:
     content = md_path.read_text(encoding="utf-8", errors="replace")
     if not content.startswith("---"):
@@ -721,7 +769,7 @@ def parse_md_frontmatter(md_path: Path) -> dict[str, str]:
         key = key.strip()
         value = value.strip()
         try:
-            fields[key] = json.loads(value)
+            fields[key] = frontmatter_value_to_str(json.loads(value))
         except json.JSONDecodeError:
             fields[key] = value.strip('"')
     return fields
@@ -741,10 +789,17 @@ def transcript_file_fields(
     return fields
 
 
+def sanitize_video_id_for_filename(video_id: str) -> str:
+    sanitized = re.sub(r"[^\w-]", "-", video_id)
+    sanitized = re.sub(r"-+", "-", sanitized).strip("-")
+    return sanitized or "unknown"
+
+
 def find_txt_file_for_video_id(txt_dir: Path, video_id: str) -> Path | None:
+    safe_id = sanitize_video_id_for_filename(video_id)
     candidates = [
         path
-        for path in txt_dir.glob(f"*_{video_id}.txt")
+        for path in txt_dir.glob(f"*_{safe_id}.txt")
         if TXT_INDEX_RE.match(path.name)
     ]
     if not candidates:
@@ -1096,7 +1151,7 @@ def write_index_md(
 def make_basename(index: int, title: str, video_id: str, used_basenames: set[str]) -> str:
     basename = f"{index:03d}_{slugify(title)}"
     if basename in used_basenames:
-        basename = f"{basename}_{video_id}"
+        basename = f"{basename}_{sanitize_video_id_for_filename(video_id)}"
     used_basenames.add(basename)
     return basename
 
@@ -1122,6 +1177,20 @@ def count_partial_repaired(processed: list[dict[str, Any]]) -> int:
     return sum(1 for item in processed if item.get("partial_repaired"))
 
 
+def should_write_progress(
+    position: int,
+    progress_interval: int,
+    *,
+    is_last: bool = False,
+    on_error: bool = False,
+) -> bool:
+    if on_error or is_last:
+        return True
+    if position == 1:
+        return True
+    return position % progress_interval == 0
+
+
 def save_progress(
     progress_path: Path,
     *,
@@ -1137,6 +1206,7 @@ def save_progress(
     requested_langs: list[str],
     output_format: OutputFormat,
     timestamps: bool,
+    progress_interval: int,
     retries: int,
     processed: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -1158,6 +1228,7 @@ def save_progress(
         "requested_langs": requested_langs,
         "output_format": output_format,
         "timestamps": timestamps,
+        "progress_interval": progress_interval,
         "retries": retries,
         "run_started_at": run_started_at,
         "last_updated_at": utc_now(),
@@ -1172,6 +1243,29 @@ def save_progress(
         "skipped": skipped,
     }
     atomic_write_json(progress_path, progress)
+
+
+def maybe_save_progress(
+    progress_path: Path,
+    *,
+    position: int,
+    run_videos: int,
+    progress_interval: int,
+    on_error: bool = False,
+    **kwargs: Any,
+) -> None:
+    if should_write_progress(
+        position,
+        progress_interval,
+        is_last=position == run_videos,
+        on_error=on_error,
+    ):
+        save_progress(
+            progress_path,
+            progress_interval=progress_interval,
+            run_videos=run_videos,
+            **kwargs,
+        )
 
 
 def print_dry_run_summary(
@@ -1249,6 +1343,7 @@ def process_channel(
     output_format: OutputFormat = "both",
     metadata_only: bool = False,
     timestamps: bool = False,
+    progress_interval: int = DEFAULT_PROGRESS_INTERVAL,
 ) -> dict[str, Any]:
     if metadata_only:
         return process_metadata_only(
@@ -1315,11 +1410,37 @@ def process_channel(
         print(f"Max videos: {max_videos}")
     print(f"Output: {base_dir}\n")
 
+    def write_progress(*, position: int, on_error: bool = False) -> None:
+        maybe_save_progress(
+            progress_path,
+            position=position,
+            run_videos=run_videos,
+            progress_interval=progress_interval,
+            on_error=on_error,
+            channel_url=channel_url,
+            channel_name=channel_name,
+            total_channel_videos=total_channel_videos,
+            start_index=start_index,
+            end_index=end_index,
+            max_videos=max_videos,
+            force=force,
+            manual_only=manual_only,
+            requested_langs=requested_langs,
+            output_format=output_format,
+            timestamps=timestamps,
+            retries=retries,
+            processed=processed,
+            skipped=skipped,
+            last_global_index=last_global_index,
+            run_started_at=run_started_at,
+        )
+
     for position, (global_index, video) in enumerate(selected_videos, start=1):
         video_id = video["id"]
         title = video["title"]
         video_url = video["url"]
         last_global_index = global_index
+        on_error = False
         print(f"[{position}/{run_videos}] (#{global_index}) {title}")
 
         proposed_basename = make_basename(global_index, title, video_id, used_basenames)
@@ -1396,26 +1517,7 @@ def process_channel(
                 transcript_file_fields(output_format, txt_path, md_path, base_dir)
             )
             skipped.append(skip_entry)
-            save_progress(
-                progress_path,
-                channel_url=channel_url,
-                channel_name=channel_name,
-                total_channel_videos=total_channel_videos,
-                run_videos=run_videos,
-                start_index=start_index,
-                end_index=end_index,
-                max_videos=max_videos,
-                force=force,
-                manual_only=manual_only,
-                requested_langs=requested_langs,
-                output_format=output_format,
-                timestamps=timestamps,
-                retries=retries,
-                processed=processed,
-                skipped=skipped,
-                last_global_index=last_global_index,
-                run_started_at=run_started_at,
-            )
+            write_progress(position=position)
             if delay > 0:
                 time.sleep(delay)
             continue
@@ -1455,26 +1557,7 @@ def process_channel(
                         "reason": subtitle_skip_reason(manual_only),
                     }
                 )
-                save_progress(
-                    progress_path,
-                    channel_url=channel_url,
-                    channel_name=channel_name,
-                    total_channel_videos=total_channel_videos,
-                    run_videos=run_videos,
-                    start_index=start_index,
-                    end_index=end_index,
-                    max_videos=max_videos,
-                    force=force,
-                    manual_only=manual_only,
-                    requested_langs=requested_langs,
-                    output_format=output_format,
-                    timestamps=timestamps,
-                    retries=retries,
-                    processed=processed,
-                    skipped=skipped,
-                    last_global_index=last_global_index,
-                    run_started_at=run_started_at,
-                )
+                write_progress(position=position)
                 if delay > 0:
                     time.sleep(delay)
                 continue
@@ -1511,26 +1594,7 @@ def process_channel(
                         "reason": "subtitle_download_failed",
                     }
                 )
-                save_progress(
-                    progress_path,
-                    channel_url=channel_url,
-                    channel_name=channel_name,
-                    total_channel_videos=total_channel_videos,
-                    run_videos=run_videos,
-                    start_index=start_index,
-                    end_index=end_index,
-                    max_videos=max_videos,
-                    force=force,
-                    manual_only=manual_only,
-                    requested_langs=requested_langs,
-                    output_format=output_format,
-                    timestamps=timestamps,
-                    retries=retries,
-                    processed=processed,
-                    skipped=skipped,
-                    last_global_index=last_global_index,
-                    run_started_at=run_started_at,
-                )
+                write_progress(position=position)
                 if delay > 0:
                     time.sleep(delay)
                 continue
@@ -1546,26 +1610,7 @@ def process_channel(
                         "reason": "empty_transcript",
                     }
                 )
-                save_progress(
-                    progress_path,
-                    channel_url=channel_url,
-                    channel_name=channel_name,
-                    total_channel_videos=total_channel_videos,
-                    run_videos=run_videos,
-                    start_index=start_index,
-                    end_index=end_index,
-                    max_videos=max_videos,
-                    force=force,
-                    manual_only=manual_only,
-                    requested_langs=requested_langs,
-                    output_format=output_format,
-                    timestamps=timestamps,
-                    retries=retries,
-                    processed=processed,
-                    skipped=skipped,
-                    last_global_index=last_global_index,
-                    run_started_at=run_started_at,
-                )
+                write_progress(position=position)
                 if delay > 0:
                     time.sleep(delay)
                 continue
@@ -1617,6 +1662,7 @@ def process_channel(
                 print(f"  -> saved ({sub_type}, {lang})")
 
         except RetryError as exc:
+            on_error = True
             print(f"  -> error: {exc}")
             skipped.append(
                 {
@@ -1629,6 +1675,7 @@ def process_channel(
                 }
             )
         except Exception as exc:
+            on_error = True
             print(f"  -> error: {exc}")
             skipped.append(
                 {
@@ -1641,26 +1688,7 @@ def process_channel(
                 }
             )
 
-        save_progress(
-            progress_path,
-            channel_url=channel_url,
-            channel_name=channel_name,
-            total_channel_videos=total_channel_videos,
-            run_videos=run_videos,
-            start_index=start_index,
-            end_index=end_index,
-            max_videos=max_videos,
-            force=force,
-            manual_only=manual_only,
-            requested_langs=requested_langs,
-            output_format=output_format,
-            timestamps=timestamps,
-            retries=retries,
-            processed=processed,
-            skipped=skipped,
-            last_global_index=last_global_index,
-            run_started_at=run_started_at,
-        )
+        write_progress(position=position, on_error=on_error)
 
         if delay > 0 and not dry_run:
             time.sleep(delay)
@@ -1725,6 +1753,7 @@ def process_channel(
         "requested_langs": requested_langs,
         "output_format": output_format,
         "timestamps": timestamps,
+        "progress_interval": progress_interval,
         "retries": retries,
         "run_started_at": run_started_at,
         "run_finished_at": utc_now(),
@@ -1876,6 +1905,15 @@ def main() -> int:
         action="store_true",
         help="Include subtitle cue start timestamps in transcript output",
     )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=DEFAULT_PROGRESS_INTERVAL,
+        help=(
+            "Write progress.json every N videos (default: "
+            f"{DEFAULT_PROGRESS_INTERVAL}); also on first, last, and errors"
+        ),
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1896,6 +1934,8 @@ def main() -> int:
         parser.error("--retries must be at least 1")
     if args.retry_delay < 0:
         parser.error("--retry-delay must not be negative")
+    if args.progress_interval < 1:
+        parser.error("--progress-interval must be at least 1")
 
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1920,6 +1960,7 @@ def main() -> int:
             args.format,
             args.metadata_only,
             args.timestamps,
+            args.progress_interval,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)
