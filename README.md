@@ -175,6 +175,28 @@ python scripts/channel_transcripts.py \
   -o ./output --lang tr,en --manual-only
 ```
 
+### Output format
+
+Choose which transcript file types to write with `--format`:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --format md
+```
+
+- `both` (default) — write both `.txt` and `.md` transcript files
+- `txt` — write only plain-text `.txt` transcripts
+- `md` — write only Markdown `.md` transcripts with YAML frontmatter
+
+`index.md` and JSON reports are still written as project metadata files; they are not controlled by `--format`.
+
+Resume behavior depends on the requested format:
+
+- `both` — complete when both `.txt` and `.md` exist; partial files are repaired
+- `txt` — complete when `.txt` exists (`.md` is not required)
+- `md` — complete when `.md` exists (`.txt` is not required)
+
 ### Dry run (preview without downloading)
 
 Preview what the script would do without fetching subtitles or writing transcript/report files:
@@ -231,6 +253,7 @@ Dry run: yes
   -> would process
 
 Dry run complete.
+Output format:          both
 Would process:          1
 Would skip existing:    2
 Would repair partial:   0
@@ -252,6 +275,7 @@ Would write files:      no
 | `--keep-cues` | off | Preserve bracketed subtitle cues |
 | `--dry-run` | off | Preview planned actions; no downloads or file writes |
 | `--lang` | `en` | Comma-separated subtitle language priority list |
+| `--format` | `both` | Output transcript format: `both`, `txt`, or `md` |
 | `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
 
@@ -278,8 +302,8 @@ output/
       report_101_200.json
 ```
 
-- **txt/** — plain transcript text
-- **md/** — Markdown with YAML frontmatter (`title`, `url`, `upload_date`, `channel`, `video_id`)
+- **txt/** — plain transcript text (written with `--format both` or `--format txt`)
+- **md/** — Markdown with YAML frontmatter (`title`, `url`, `upload_date`, `channel`, `video_id`; written with `--format both` or `--format md`)
 - **index.md** — table of all transcripts found on disk
 - **progress.json** — live run state, updated after each video
 - **report.json** — latest run summary (`total_videos` + `total_channel_videos`)
@@ -290,8 +314,9 @@ output/
 ## Resume behavior
 
 - Existing transcripts are detected by `video_id` from Markdown frontmatter
-- If both `.txt` and `.md` exist for a `video_id`, the video is skipped unless `--force` is used
-- If only one file exists, the video is repaired automatically
+- With `--format both`, if both `.txt` and `.md` exist for a `video_id`, the video is skipped unless `--force` is used
+- With `--format txt`, only `.txt` is required for resume; with `--format md`, only `.md` is required
+- Partial files are repaired automatically according to the requested format
 - This avoids duplicate files when a video title changes
 
 ## Channel tabs
