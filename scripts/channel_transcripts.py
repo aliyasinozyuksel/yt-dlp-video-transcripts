@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import html
 import json
 import re
@@ -23,7 +24,7 @@ except ImportError as exc:
 else:
     _YT_DLP_IMPORT_ERROR = None
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 DEFAULT_LANGS = ["en"]
 DEFAULT_OUTPUT_FORMAT = "both"
@@ -249,6 +250,165 @@ def select_videos(
         return [(index, all_videos[index - 1]) for index in range(1, count + 1)]
 
     return [(index, all_videos[index - 1]) for index in range(1, total + 1)]
+
+
+def build_metadata_videos_list(
+    selected_videos: list[tuple[int, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "index": global_index,
+            "id": video["id"],
+            "title": video["title"],
+            "url": video["url"],
+            "upload_date": format_upload_date(video.get("upload_date")),
+        }
+        for global_index, video in selected_videos
+    ]
+
+
+def build_metadata_payload(
+    *,
+    channel_url: str,
+    channel_name: str,
+    total_channel_videos: int,
+    selected_count: int,
+    start_index: int | None,
+    end_index: int | None,
+    max_videos: int | None,
+    videos: list[dict[str, Any]],
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "channel_url": channel_url,
+        "channel_name": channel_name,
+        "total_channel_videos": total_channel_videos,
+        "total_videos": total_channel_videos,
+        "selected_count": selected_count,
+        "start_index": start_index,
+        "end_index": end_index,
+        "max_videos": max_videos,
+        "generated_at": generated_at or utc_now(),
+        "videos": videos,
+    }
+
+
+def write_videos_json(path: Path, payload: dict[str, Any]) -> None:
+    atomic_write_json(path, payload)
+
+
+def write_videos_csv(path: Path, videos: list[dict[str, Any]]) -> None:
+    fieldnames = ["index", "id", "title", "url", "upload_date"]
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for video in videos:
+            writer.writerow({field: video[field] for field in fieldnames})
+    tmp_path.replace(path)
+
+
+def print_metadata_only_summary(
+    *,
+    videos_json_path: Path,
+    videos_csv_path: Path,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        print("\nWould write metadata files: no")
+        return
+    print("\nMetadata written:")
+    print(f"videos.json: {videos_json_path}")
+    print(f"videos.csv:  {videos_csv_path}")
+
+
+def process_metadata_only(
+    channel_url: str,
+    output_dir: Path,
+    *,
+    max_videos: int | None = None,
+    start_index: int | None = None,
+    end_index: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    channel_name, all_videos = list_channel_videos(channel_url)
+    total_channel_videos = len(all_videos)
+
+    if total_channel_videos == 0:
+        raise UserError("No videos found for the provided URL.")
+
+    selected_videos = select_videos(all_videos, max_videos, start_index, end_index)
+    selected_count = len(selected_videos)
+
+    if selected_count == 0:
+        raise UserError("The selected range contains no videos.")
+
+    channel_slug = slugify(channel_name)
+    base_dir = output_dir / channel_slug
+    if not dry_run:
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+    videos_json_path = base_dir / "videos.json"
+    videos_csv_path = base_dir / "videos.csv"
+    metadata_videos = build_metadata_videos_list(selected_videos)
+    generated_at = utc_now()
+
+    print(f"Channel: {channel_name}")
+    print(f"Total videos (channel): {total_channel_videos}")
+    print(f"Videos selected: {selected_count}")
+    print("Metadata only: yes")
+    if dry_run:
+        print("Dry run: yes")
+    if start_index is not None or end_index is not None:
+        print(f"Index range: {start_index or 1}-{end_index or total_channel_videos}")
+    elif max_videos is not None:
+        print(f"Max videos: {max_videos}")
+    print(f"Output: {base_dir}\n")
+
+    for position, (global_index, video) in enumerate(selected_videos, start=1):
+        print(f"[{position}/{selected_count}] (#{global_index}) {video['title']}")
+
+    payload = build_metadata_payload(
+        channel_url=channel_url,
+        channel_name=channel_name,
+        total_channel_videos=total_channel_videos,
+        selected_count=selected_count,
+        start_index=start_index,
+        end_index=end_index,
+        max_videos=max_videos,
+        videos=metadata_videos,
+        generated_at=generated_at,
+    )
+
+    report: dict[str, Any] = {
+        "metadata_only": True,
+        "dry_run": dry_run,
+        "channel_url": channel_url,
+        "channel_name": channel_name,
+        "total_channel_videos": total_channel_videos,
+        "total_videos": total_channel_videos,
+        "selected_count": selected_count,
+        "start_index": start_index,
+        "end_index": end_index,
+        "max_videos": max_videos,
+        "generated_at": generated_at,
+        "output_path": str(base_dir),
+        "videos_json_path": str(videos_json_path),
+        "videos_csv_path": str(videos_csv_path),
+        "videos": metadata_videos,
+        "would_write_metadata_files": not dry_run,
+    }
+
+    if not dry_run:
+        write_videos_json(videos_json_path, payload)
+        write_videos_csv(videos_csv_path, metadata_videos)
+
+    print_metadata_only_summary(
+        videos_json_path=videos_json_path,
+        videos_csv_path=videos_csv_path,
+        dry_run=dry_run,
+    )
+    return report
 
 
 def fetch_video_metadata(video_url: str) -> dict[str, Any]:
@@ -994,7 +1154,18 @@ def process_channel(
     manual_only: bool = False,
     requested_langs: list[str] | None = None,
     output_format: OutputFormat = "both",
+    metadata_only: bool = False,
 ) -> dict[str, Any]:
+    if metadata_only:
+        return process_metadata_only(
+            channel_url,
+            output_dir,
+            max_videos=max_videos,
+            start_index=start_index,
+            end_index=end_index,
+            dry_run=dry_run,
+        )
+
     if requested_langs is None:
         requested_langs = list(DEFAULT_LANGS)
     channel_name, all_videos = list_channel_videos(channel_url)
@@ -1585,6 +1756,11 @@ def main() -> int:
         default=DEFAULT_OUTPUT_FORMAT,
         help="Output transcript format: both, txt, or md (default: both)",
     )
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Write selected video list metadata without downloading transcripts",
+    )
     args = parser.parse_args()
 
     if args.max_videos is not None and args.max_videos <= 0:
@@ -1627,6 +1803,7 @@ def main() -> int:
             args.manual_only,
             requested_langs,
             args.format,
+            args.metadata_only,
         )
     except UserError as exc:
         print(f"Error: {exc}", file=sys.stderr)

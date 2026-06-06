@@ -197,6 +197,25 @@ Resume behavior depends on the requested format:
 - `txt` — complete when `.txt` exists (`.md` is not required)
 - `md` — complete when `.md` exists (`.txt` is not required)
 
+### Metadata only
+
+List selected videos without downloading subtitles or writing transcript files:
+
+```bash
+python scripts/channel_transcripts.py \
+  "https://www.youtube.com/@channel/videos" \
+  -o ./output --metadata-only
+```
+
+This uses yt-dlp flat extraction to list videos and writes:
+
+- `videos.json` — structured metadata for the selected videos
+- `videos.csv` — spreadsheet-friendly export with `index`, `id`, `title`, `url`, `upload_date`
+
+Useful before processing large channels to inspect or plan chunked runs. Combine with `--max-videos`, `--start-index`, or `--end-index` to limit the selection.
+
+With `--metadata-only --dry-run`, videos are listed but `videos.json` and `videos.csv` are not written.
+
 ### Dry run (preview without downloading)
 
 Preview what the script would do without fetching subtitles or writing transcript/report files:
@@ -276,6 +295,7 @@ Would write files:      no
 | `--dry-run` | off | Preview planned actions; no downloads or file writes |
 | `--lang` | `en` | Comma-separated subtitle language priority list |
 | `--format` | `both` | Output transcript format: `both`, `txt`, or `md` |
+| `--metadata-only` | off | Write selected video list metadata without downloading transcripts |
 | `--manual-only` | off | Use only manual subtitles for requested languages; no auto caption fallback |
 | `--version` | — | Show version and exit |
 
@@ -292,6 +312,8 @@ output/
     md/
       001_video-title.md
       101_another-video.md
+    videos.json
+    videos.csv
     index.md
     progress.json
     report.json
@@ -302,6 +324,8 @@ output/
       report_101_200.json
 ```
 
+- **videos.json** — selected video list metadata (written with `--metadata-only`)
+- **videos.csv** — CSV export of selected videos (written with `--metadata-only`)
 - **txt/** — plain transcript text (written with `--format both` or `--format txt`)
 - **md/** — Markdown with YAML frontmatter (`title`, `url`, `upload_date`, `channel`, `video_id`; written with `--format both` or `--format md`)
 - **index.md** — table of all transcripts found on disk
